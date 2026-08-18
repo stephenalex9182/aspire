@@ -115,7 +115,7 @@ formatted_agent_chain = (
 # --- 3. FastAPI App ---
 ##Need To Code
 app=FastAPI(title="Indian Weather and Cinem Agents")
-add_rountes(app, formatted_agent_chain, path="/agent",playground_type="default")
+add_routes(app, formatted_agent_chain, path="/agent",playground_type="default")
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
