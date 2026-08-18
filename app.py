@@ -1,8 +1,8 @@
-import json
 import os
 import requests
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from langchain.agents import create_agent
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
@@ -11,8 +11,8 @@ from langserve import add_routes
 from pydantic import BaseModel, Field
 
 
-# --- 1. Define Tools (All returning pure strings) ---
-
+# --- 1. Define Tools (Natural language string returns) ---
+@tool
 def search_movies(genre: str) -> str:
     """Search for Indian movies by genre."""
     movies = {
@@ -23,13 +23,14 @@ def search_movies(genre: str) -> str:
     return movies.get(genre.lower(), "No movies found for that genre")
 
 
-
+@tool
 def change__to_f(temp_c: float) -> str:
-    """Converts the Celsius temperature to Fahrenheit temperature and returns a string."""
+    """Converts the Celsius temperature to Fahrenheit temperature string."""
     temp_f = temp_c * 1.8 + 32
     return f"{temp_f:.2f} °F"
 
 
+@tool
 def get_weather(city: str) -> str:
     """Get current temperature for a given city name."""
     geo_url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -55,14 +56,11 @@ def get_weather(city: str) -> str:
             weather_url, params=weather_params
         ).json()["current"]
 
-        result = {
-            "resolved_city": str(location.get("name")),
-            "temperature_celsius": str(
-                weather_response.get("temperature_2m")
-            ),
-            "weather_code": str(weather_response.get("weather_code")),
-        }
-        return json.dumps(result)
+        # Return a readable string rather than json.dumps() so the LLM doesn't output JSON format
+        city_name = location.get("name")
+        temp = weather_response.get("temperature_2m")
+        code = weather_response.get("weather_code")
+        return f"Weather in {city_name}: {temp}°C, weather code: {code}."
     except Exception as e:
         return f"Error retrieving weather data: {str(e)}"
 
@@ -73,7 +71,9 @@ tools = [get_weather, search_movies, change__to_f]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 llm_flash = ChatGoogleGenerativeAI(
-    model="gemma-4-31b-it", api_key=GEMINI_API_KEY, temperature=0
+    model="gemma-4-31b-it",
+    api_key=GEMINI_API_KEY,
+    temperature=0,
 )
 
 agent = create_agent(
@@ -81,7 +81,7 @@ agent = create_agent(
     tools=tools,
     system_prompt=(
         "You are a specialized agent restricted ONLY to Indian weather and cinema. "
-        "Always format your answers in plain text strings. "
+        "Always respond in plain conversational text sentences. Never output JSON, dictionaries, or key-value pairs. "
         "For any other roles, topics, questions, or general knowledge outside of Indian weather and movies, "
         "you must say exactly: 'I am not authorized to answer questions outside of Indian weather and cinema.'"
     ),
@@ -98,7 +98,7 @@ def format_for_agent(x) -> dict:
 
 
 def extract_text_response(agent_output) -> str:
-    """Guarantees a clean, single string return value."""
+    """Extracts the final assistant message and strips out any dict structures."""
     if not isinstance(agent_output, dict):
         return str(agent_output)
 
@@ -114,7 +114,6 @@ def extract_text_response(agent_output) -> str:
         last = messages[-1]
         content = getattr(last, "content", last)
 
-        # Handle multimodal/structured chunk lists if returned by LangChain
         if isinstance(content, list):
             text_parts = [
                 part.get("text", str(part))
@@ -122,11 +121,11 @@ def extract_text_response(agent_output) -> str:
                 else str(part)
                 for part in content
             ]
-            return "".join(text_parts)
+            return "".join(text_parts).strip()
 
-        return str(content)
+        return str(content).strip()
 
-    return str(agent_output)
+    return str(agent_output).strip()
 
 
 formatted_agent_chain = (
@@ -138,12 +137,21 @@ formatted_agent_chain = (
 # --- 3. FastAPI App ---
 app = FastAPI(title="Indian Weather and Cinema Agents")
 
+# Standard LangServe playground route
 add_routes(
     app,
     formatted_agent_chain,
     path="/agent",
     playground_type="default",
 )
+
+
+# Direct endpoint returning a pure plain text string response (no JSON dictionary wrapping)
+@app.post("/chat", response_class=PlainTextResponse)
+async def chat_endpoint(data: AgentInput) -> str:
+    response_text = await formatted_agent_chain.ainvoke(data)
+    return str(response_text)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
