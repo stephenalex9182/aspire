@@ -10,8 +10,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langserve import add_routes
 from pydantic import BaseModel, Field
 
-
-# --- 1. Define Tools (Natural language string returns) ---
+# --- 1. Define Tools ---
 @tool
 def search_movies(genre: str) -> str:
     """Search for Indian movies by genre."""
@@ -56,7 +55,6 @@ def get_weather(city: str) -> str:
             weather_url, params=weather_params
         ).json()["current"]
 
-        # Return a readable string rather than json.dumps() so the LLM doesn't output JSON format
         city_name = location.get("name")
         temp = weather_response.get("temperature_2m")
         code = weather_response.get("weather_code")
@@ -71,7 +69,7 @@ tools = [get_weather, search_movies, change__to_f]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 llm_flash = ChatGoogleGenerativeAI(
-    model="gemma-4-31b-it",
+    model="gemini-1.5-flash",
     api_key=GEMINI_API_KEY,
     temperature=0,
 )
@@ -137,7 +135,6 @@ formatted_agent_chain = (
 # --- 3. FastAPI App ---
 app = FastAPI(title="Indian Weather and Cinema Agents")
 
-# Standard LangServe playground route
 add_routes(
     app,
     formatted_agent_chain,
@@ -146,7 +143,6 @@ add_routes(
 )
 
 
-# Direct endpoint returning a pure plain text string response (no JSON dictionary wrapping)
 @app.post("/chat", response_class=PlainTextResponse)
 async def chat_endpoint(data: AgentInput) -> str:
     response_text = await formatted_agent_chain.ainvoke(data)
