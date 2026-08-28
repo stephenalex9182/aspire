@@ -1,344 +1,239 @@
+"""
+AI Real Estate Agent — LangGraph + Flask chatbot
+--------------------------------------------------
+A single-file agentic chatbot that ONLY answers questions related to
+real estate (buying, selling, renting, mortgages, property valuation,
+market trends, home inspection, real-estate law basics, etc.).
+
+Any question outside the real-estate domain is politely declined by
+the agent's own routing logic — this is enforced INSIDE the LangGraph
+graph (a "topic guard" node), not just via a system prompt.
+
+Deploy on Render:
+  Build Command : pip install -r requirements.txt
+  Start Command : python app.py
+  Env Vars      : OPENAI_API_KEY = <your key>
+
+Render provides the app a PORT env var — this app binds to it and to
+0.0.0.0 so the Render URL opens the chat UI directly.
+"""
+
 import os
-import requests
-import uvicorn
-import threading
-import nest_asyncio
-import socket
+from typing import TypedDict, List
 
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from flask import Flask, request, jsonify, Response
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from langchain.agents import create_agent
-from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-from pydantic import BaseModel, Field
-from google.colab import userdata
-
-nest_asyncio.apply()
-
-
-# ============================================================
-# 1. DEFINE TOOLS
-# ============================================================
-
-@tool
-def search_movies(genre: str) -> str:
-    """Search for Indian movies by genre."""
-
-    movies = {
-        "sci-fi": "Cargo, 2.0, Mr. India",
-        "comedy": "3 Idiots, Hera Pheri, Munna Bhai M.B.B.S.",
-        "action": "RRR, Vikram, Baahubali",
-        "horror": "Tumbbad, Stree, Bhool Bhulaiyaa",
-        "thriller": "Drishyam, Andhadhun, Ratsasan",
-        "romance": "Jab We Met, Sita Ramam, 96",
-    }
-
-    return movies.get(
-        genre.lower(),
-        "No movies found for that genre."
-    )
-
-
-@tool
-def change_to_f(temp_c: float) -> str:
-    """Convert Celsius temperature to Fahrenheit."""
-
-    temp_f = temp_c * 1.8 + 32
-
-    return f"{temp_f:.2f} °F"
-
-
-@tool
-def get_weather(city: str) -> str:
-    """Get the current weather for an Indian city."""
-
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-
-    geo_params = {
-        "name": city,
-        "count": 1,
-        "language": "en",
-        "format": "json",
-    }
-
-    try:
-
-        # ----------------------------------------------------
-        # Find city coordinates
-        # ----------------------------------------------------
-
-        geo_response = requests.get(
-            geo_url,
-            params=geo_params,
-            timeout=10
-        )
-
-        geo_response.raise_for_status()
-
-        geo_data = geo_response.json()
-
-        if not geo_data.get("results"):
-            return f"Could not find the city: {city}"
-
-        location = geo_data["results"][0]
-
-        latitude = location["latitude"]
-        longitude = location["longitude"]
-
-        city_name = location.get("name", city)
-
-        # ----------------------------------------------------
-        # Get weather
-        # ----------------------------------------------------
-
-        weather_url = "https://api.open-meteo.com/v1/forecast"
-
-        weather_params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": "temperature_2m,weather_code",
-            "temperature_unit": "celsius",
-        }
-
-        weather_response = requests.get(
-            weather_url,
-            params=weather_params,
-            timeout=10
-        )
-
-        weather_response.raise_for_status()
-
-        weather_data = weather_response.json()
-
-        current_weather = weather_data.get("current", {})
-
-        temperature = current_weather.get("temperature_2m")
-        weather_code = current_weather.get("weather_code")
-
-        return (
-            f"Weather in {city_name}: "
-            f"{temperature}°C, "
-            f"weather code: {weather_code}."
-        )
-
-    except requests.RequestException as e:
-
-        return f"Weather service error: {str(e)}"
-
-    except Exception as e:
-
-        return f"Error retrieving weather data: {str(e)}"
-
-
-# ============================================================
-# 2. TOOL LIST
-# ============================================================
-
-tools = [
-    get_weather,
-    search_movies,
-    change_to_f,
-]
-
-
-# ============================================================
-# 3. GEMINI API KEY
-# ============================================================
-
-GEMINI_API_KEY = userdata.get("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "GEMINI_API_KEY environment variable is not set."
-    )
-
-
-# ============================================================
-# 4. INITIALIZE GEMINI
-# ============================================================
-
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    google_api_key=GEMINI_API_KEY,
-    temperature=0,
+# ---------------------------------------------------------------------
+# 1. LLM
+# ---------------------------------------------------------------------
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.3,
+    api_key=os.environ.get("OPENAI_API_KEY"),
 )
 
+REAL_ESTATE_SYSTEM_PROMPT = """You are "EstateBot", an AI Real Estate Agent assistant.
+You ONLY help with real-estate related topics such as:
+- Buying, selling, or renting residential/commercial property
+- Property valuation, pricing trends, and market analysis
+- Mortgages, loans, EMIs, down payments, and financing
+- Home inspection, legal documents (sale deed, RERA, title check)
+- Neighborhood/locality comparisons, amenities, and investment advice
+- Negotiation tips and listing descriptions
 
-# ============================================================
-# 5. SYSTEM PROMPT
-# ============================================================
+Stay concise, professional, and helpful. Ask clarifying questions
+(budget, location, property type) when useful. Never answer questions
+unrelated to real estate — the system will already filter those out,
+but if one slips through, politely redirect the user back to real
+estate topics.
+"""
 
-SYSTEM_PROMPT = """
-You are a specialized assistant.
+# ---------------------------------------------------------------------
+# 2. Graph State
+# ---------------------------------------------------------------------
+class AgentState(TypedDict):
+    messages: List[dict]      # chat history: [{"role": "user"/"assistant", "content": str}]
+    user_input: str
+    is_real_estate: bool
+    response: str
 
-You are ONLY authorized to answer questions related to:
 
-1. Indian weather
-2. Indian movies and cinema
-3. Temperature conversion when required for weather
+# ---------------------------------------------------------------------
+# 3. Nodes
+# ---------------------------------------------------------------------
+def topic_guard_node(state: AgentState) -> AgentState:
+    """Rule-based + LLM-assisted check: is this query about real estate?"""
+    query = state["user_input"].lower()
 
-You have access to tools for:
-- Getting weather information
-- Searching Indian movies by genre
-- Converting Celsius to Fahrenheit
+    real_estate_keywords = [
+        "property", "house", "home", "apartment", "flat", "rent", "lease",
+        "mortgage", "loan", "emi", "real estate", "realtor", "broker",
+        "buy", "sell", "listing", "valuation", "price", "market", "land",
+        "plot", "villa", "condo", "tenant", "landlord", "square feet",
+        "sqft", "down payment", "interest rate", "deed", "rera", "agent",
+        "neighborhood", "locality", "investment property", "resale",
+        "commercial space", "office space", "closing cost", "appraisal",
+    ]
 
-For weather questions, use the weather tool.
+    if any(kw in query for kw in real_estate_keywords):
+        state["is_real_estate"] = True
+        return state
 
-For Indian movie questions, use the movie search tool when appropriate.
+    # Fallback: ask the LLM to classify ambiguous queries
+    classification = llm.invoke([
+        SystemMessage(content=(
+            "Reply with only one word: 'YES' if the following user message "
+            "is related to real estate (property, housing, rent, buying, "
+            "selling, mortgages, etc.), or 'NO' if it is not."
+        )),
+        HumanMessage(content=state["user_input"]),
+    ])
+    state["is_real_estate"] = "YES" in classification.content.upper()
+    return state
 
-For temperature conversion, use the temperature conversion tool when appropriate.
 
-Always respond in plain conversational text.
+def real_estate_agent_node(state: AgentState) -> AgentState:
+    """Main agentic node — answers using conversation history."""
+    history = [SystemMessage(content=REAL_ESTATE_SYSTEM_PROMPT)]
+    for m in state["messages"]:
+        if m["role"] == "user":
+            history.append(HumanMessage(content=m["content"]))
+        else:
+            history.append(AIMessage(content=m["content"]))
+    history.append(HumanMessage(content=state["user_input"]))
 
-Never output JSON.
-Never output dictionaries.
-Never output raw Python structures.
+    result = llm.invoke(history)
+    state["response"] = result.content
+    return state
 
-For any question outside Indian weather and Indian cinema, respond exactly:
 
-I am not authorized to answer questions outside of Indian weather and cinema.
+def refusal_node(state: AgentState) -> AgentState:
+    """Runs when the query is NOT about real estate."""
+    state["response"] = (
+        "I'm EstateBot, an AI Real Estate Agent 🏠 — I can only help with "
+        "real-estate topics like buying, selling, renting, mortgages, "
+        "property valuation, or market trends. Could you ask me something "
+        "related to real estate?"
+    )
+    return state
+
+
+def route_after_guard(state: AgentState) -> str:
+    return "agent" if state["is_real_estate"] else "refuse"
+
+
+# ---------------------------------------------------------------------
+# 4. Build LangGraph
+# ---------------------------------------------------------------------
+graph = StateGraph(AgentState)
+graph.add_node("guard", topic_guard_node)
+graph.add_node("agent", real_estate_agent_node)
+graph.add_node("refuse", refusal_node)
+
+graph.set_entry_point("guard")
+graph.add_conditional_edges("guard", route_after_guard, {"agent": "agent", "refuse": "refuse"})
+graph.add_edge("agent", END)
+graph.add_edge("refuse", END)
+
+compiled_graph = graph.compile()
+
+# ---------------------------------------------------------------------
+# 5. Flask app (serves chat UI + API on the same Render URL)
+# ---------------------------------------------------------------------
+app = Flask(__name__)
+
+# In-memory session history (single-user demo; resets on restart)
+chat_history: List[dict] = []
+
+CHAT_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Real Estate Agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, Arial, sans-serif; background:#0f172a; margin:0; color:#e2e8f0; }
+  .wrap { max-width:640px; margin:0 auto; height:100vh; display:flex; flex-direction:column; }
+  header { padding:16px; background:#1e293b; text-align:center; font-size:20px; font-weight:600; }
+  #chat { flex:1; overflow-y:auto; padding:16px; }
+  .msg { margin:8px 0; padding:10px 14px; border-radius:14px; max-width:80%; line-height:1.4; }
+  .user { background:#2563eb; margin-left:auto; }
+  .bot { background:#334155; margin-right:auto; }
+  form { display:flex; padding:12px; background:#1e293b; }
+  input { flex:1; padding:10px; border-radius:8px; border:none; margin-right:8px; }
+  button { padding:10px 18px; border:none; border-radius:8px; background:#2563eb; color:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>🏠 AI Real Estate Agent</header>
+  <div id="chat"></div>
+  <form id="f">
+    <input id="i" placeholder="Ask about buying, renting, mortgages..." autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+</div>
+<script>
+const chat = document.getElementById('chat');
+const form = document.getElementById('f');
+const input = document.getElementById('i');
+
+function addMsg(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  addMsg(text, 'user');
+  input.value = '';
+  const res = await fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text})
+  });
+  const data = await res.json();
+  addMsg(data.response, 'bot');
+});
+</script>
+</body>
+</html>
 """
 
 
-# ============================================================
-# 6. CREATE LANGCHAIN AGENT
-# ============================================================
-
-agent = create_agent(
-    model=llm,
-    tools=tools,
-    system_prompt=SYSTEM_PROMPT,
-)
+@app.route("/")
+def index() -> Response:
+    return Response(CHAT_HTML, mimetype="text/html")
 
 
-# ============================================================
-# 7. REQUEST MODEL
-# ============================================================
+@app.route("/chat", methods=["POST"])
+def chat():
+    user_message = request.json.get("message", "")
 
-class AgentInput(BaseModel):
-
-    input: str = Field(
-        description="Your message to the agent"
-    )
-
-
-# ============================================================
-# 8. FASTAPI APPLICATION
-# ============================================================
-
-app = FastAPI(
-    title="Indian Weather and Cinema Agent",
-    description="LangChain + Gemini + FastAPI Agent",
-    version="1.0.0",
-)
-
-
-# ============================================================
-# 9. CHAT ENDPOINT
-# ============================================================
-
-@app.post(
-    "/chat",
-    response_class=PlainTextResponse
-)
-async def chat_endpoint(data: AgentInput):
-
-    try:
-
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": data.input,
-                    }
-                ]
-            }
-        )
-
-        messages = result.get("messages", [])
-
-        if not messages:
-            return "No response generated."
-
-        # Last message generated by the agent
-        final_message = messages[-1]
-
-        content = final_message.content
-
-        # ----------------------------------------------------
-        # Handle normal string content
-        # ----------------------------------------------------
-
-        if isinstance(content, str):
-            return content
-
-        # ----------------------------------------------------
-        # Handle Gemini structured content
-        # ----------------------------------------------------
-
-        if isinstance(content, list):
-
-            text_parts = []
-
-            for item in content:
-
-                if isinstance(item, dict):
-
-                    if item.get("type") == "text":
-                        text_parts.append(
-                            item.get("text", "")
-                        )
-
-                elif isinstance(item, str):
-
-                    text_parts.append(item)
-
-            if text_parts:
-                return " ".join(text_parts)
-
-        return str(content)
-
-    except Exception as e:
-
-        return f"Error: {str(e)}"
-
-
-# ============================================================
-# 10. HEALTH CHECK
-# ============================================================
-
-@app.get("/")
-async def root():
-
-    return {
-        "status": "running",
-        "message": "Indian Weather and Cinema Agent is running."
+    state: AgentState = {
+        "messages": chat_history.copy(),
+        "user_input": user_message,
+        "is_real_estate": False,
+        "response": "",
     }
 
+    result = compiled_graph.invoke(state)
 
-# ============================================================
-# 11. RUN SERVER
-# ============================================================
+    chat_history.append({"role": "user", "content": user_message})
+    chat_history.append({"role": "assistant", "content": result["response"]})
 
-def find_free_port():
-    """Finds a free port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('0.0.0.0', 0))
-        return s.getsockname()[1]
+    return jsonify({"response": result["response"]})
+
 
 if __name__ == "__main__":
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            find_free_port() # Use a dynamic port if default is not set or in use
-        )
-    )
-
-    # Run in a separate thread to avoid Colab event loop conflict
-    thread = threading.Thread(target=uvicorn.run, kwargs={"app": app, "host": "0.0.0.0", "port": port})
-    thread.start()
-    print(f"Server running on http://0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
