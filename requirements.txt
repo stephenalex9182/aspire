@@ -1,8 +1,6 @@
-fastapi
-uvicorn
-langserve
-langchain
-langchain-core
-langchain-google-genai
-requests
-sse_starlette
+flask==3.0.3
+langgraph==0.2.39
+langchain-openai==0.2.2
+langchain-core==0.3.10
+gunicorn==22.0.0
+ 
