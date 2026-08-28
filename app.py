@@ -3,8 +3,8 @@ import requests
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
-from langchain.agents import create_agent
-from langchain_core.runnables import RunnableLambda
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langserve import add_routes
@@ -23,7 +23,7 @@ def search_movies(genre: str) -> str:
 
 
 @tool
-def change__to_f(temp_c: float) -> str:
+def change_to_f(temp_c: float) -> str:
     """Converts the Celsius temperature to Fahrenheit temperature string."""
     temp_f = temp_c * 1.8 + 32
     return f"{temp_f:.2f} °F"
@@ -37,7 +37,7 @@ def get_weather(city: str) -> str:
 
     try:
         geo_response = requests.get(geo_url, params=geo_params).json()
-        if "results" not in geo_response or not geo_response["results"]:
+        if "results" not in geo_response or not geo_response.get("results"):
             return f"Could not find weather data for city: {city}"
 
         location = geo_response["results"][0]
@@ -53,7 +53,7 @@ def get_weather(city: str) -> str:
         }
         weather_response = requests.get(
             weather_url, params=weather_params
-        ).json()["current"]
+        ).json().get("current", {})
 
         city_name = location.get("name")
         temp = weather_response.get("temperature_2m")
@@ -63,90 +63,53 @@ def get_weather(city: str) -> str:
         return f"Error retrieving weather data: {str(e)}"
 
 
-tools = [get_weather, search_movies, change__to_f]
+tools = [get_weather, search_movies, change_to_f]
 
-# --- 2. Initialize Model & Agent ---
+# --- 2. Initialize Gemini Model & Agent ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-llm_flash = ChatGoogleGenerativeAI(
+llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
-    api_key=GEMINI_API_KEY,
+    google_api_key=GEMINI_API_KEY,
     temperature=0,
 )
 
-agent = create_agent(
-    model=llm_flash,
-    tools=tools,
-    system_prompt=(
-        "You are a specialized agent restricted ONLY to Indian weather and cinema. "
-        "Always respond in plain conversational text sentences. Never output JSON, dictionaries, or key-value pairs. "
-        "For any other roles, topics, questions, or general knowledge outside of Indian weather and movies, "
-        "you must say exactly: 'I am not authorized to answer questions outside of Indian weather and cinema.'"
-    ),
+prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a specialized assistant restricted ONLY to Indian weather and cinema. "
+            "Always respond in plain conversational text sentences. Never output JSON, dictionaries, or raw structures. "
+            "For any other roles, topics, questions, or general knowledge outside of Indian weather and movies, "
+            "you must say exactly: 'I am not authorized to answer questions outside of Indian weather and cinema.'",
+        ),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ]
 )
+
+agent = create_tool_calling_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False)
 
 
 class AgentInput(BaseModel):
     input: str = Field(description="Your message to the agent")
 
 
-def format_for_agent(x) -> dict:
-    user_input = x["input"] if isinstance(x, dict) else x.input
-    return {"messages": [("user", str(user_input))]}
-
-
-def extract_text_response(agent_output) -> str:
-    """Extracts the final assistant message and strips out any dict structures."""
-    if not isinstance(agent_output, dict):
-        return str(agent_output)
-
-    messages = agent_output.get("messages")
-
-    if messages is None:
-        for value in agent_output.values():
-            if isinstance(value, dict) and "messages" in value:
-                messages = value["messages"]
-                break
-
-    if messages:
-        last = messages[-1]
-        content = getattr(last, "content", last)
-
-        if isinstance(content, list):
-            text_parts = [
-                part.get("text", str(part))
-                if isinstance(part, dict)
-                else str(part)
-                for part in content
-            ]
-            return "".join(text_parts).strip()
-
-        return str(content).strip()
-
-    return str(agent_output).strip()
-
-
-formatted_agent_chain = (
-    RunnableLambda(format_for_agent)
-    | agent
-    | RunnableLambda(extract_text_response)
-).with_types(input_type=AgentInput, output_type=str)
-
-# --- 3. FastAPI App ---
+# --- 3. FastAPI Application ---
 app = FastAPI(title="Indian Weather and Cinema Agents")
 
 add_routes(
     app,
-    formatted_agent_chain,
+    agent_executor.with_types(input_type=AgentInput),
     path="/agent",
-    playground_type="default",
 )
 
 
 @app.post("/chat", response_class=PlainTextResponse)
 async def chat_endpoint(data: AgentInput) -> str:
-    response_text = await formatted_agent_chain.ainvoke(data)
-    return str(response_text)
+    result = await agent_executor.ainvoke({"input": data.input})
+    return str(result.get("output", ""))
 
 
 if __name__ == "__main__":
