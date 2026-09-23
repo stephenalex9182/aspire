@@ -1,0 +1,411 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Research AI Agent</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        body {
+            background: #0b1020;
+            color: #ffffff;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .app {
+            width: 95%;
+            max-width: 1200px;
+            height: 90vh;
+            display: flex;
+            background: #11182b;
+            border: 1px solid #27324d;
+            border-radius: 18px;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+
+        .sidebar {
+            width: 260px;
+            background: #0d1425;
+            padding: 25px;
+            border-right: 1px solid #27324d;
+        }
+
+        .logo {
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 35px;
+        }
+
+        .logo span {
+            color: #4da3ff;
+        }
+
+        .sidebar h3 {
+            font-size: 13px;
+            color: #8792aa;
+            margin-bottom: 15px;
+        }
+
+        .topic {
+            padding: 12px;
+            margin-bottom: 8px;
+            border-radius: 8px;
+            background: #151e34;
+            color: #cbd3e5;
+            cursor: pointer;
+        }
+
+        .topic:hover {
+            background: #1d2945;
+        }
+
+        /* Main */
+
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 20px 25px;
+            border-bottom: 1px solid #27324d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h2 {
+            font-size: 20px;
+        }
+
+        .status {
+            font-size: 12px;
+            color: #65d68b;
+        }
+
+        /* Chat */
+
+        .chat {
+            flex: 1;
+            padding: 25px;
+            overflow-y: auto;
+        }
+
+        .message {
+            display: flex;
+            margin-bottom: 20px;
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .bubble {
+            max-width: 70%;
+            padding: 14px 17px;
+            border-radius: 14px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .bot .bubble {
+            background: #19243c;
+            color: #dbe4f7;
+        }
+
+        .user .bubble {
+            background: #2563eb;
+            color: white;
+        }
+
+        /* Input */
+
+        .input-area {
+            padding: 20px;
+            border-top: 1px solid #27324d;
+        }
+
+        .input-box {
+            display: flex;
+            gap: 10px;
+        }
+
+        input {
+            flex: 1;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #34415f;
+            outline: none;
+            background: #0c1323;
+            color: white;
+            font-size: 15px;
+        }
+
+        button {
+            padding: 0 22px;
+            border: none;
+            border-radius: 10px;
+            background: #2563eb;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .quick-actions button {
+            padding: 8px 12px;
+            background: #18233b;
+            color: #b8c4db;
+            font-size: 12px;
+        }
+
+        @media (max-width: 750px) {
+            .sidebar {
+                display: none;
+            }
+
+            .bubble {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="app">
+
+    <aside class="sidebar">
+
+        <div class="logo">
+            Fin<span>Agent</span>
+        </div>
+
+        <h3>ANALYSIS TOPICS</h3>
+
+        <div class="topic" onclick="quickQuestion('Analyze the financial health of Apple')">
+            Financial Health
+        </div>
+
+        <div class="topic" onclick="quickQuestion('Calculate profit margin')">
+            Profit Margin
+        </div>
+
+        <div class="topic" onclick="quickQuestion('Analyze revenue growth')">
+            Revenue Growth
+        </div>
+
+        <div class="topic" onclick="quickQuestion('Analyze debt risk')">
+            Debt Analysis
+        </div>
+
+        <div class="topic" onclick="quickQuestion('Give business growth suggestions')">
+            Growth Strategy
+        </div>
+
+        <div class="topic" onclick="quickQuestion('Give a company overview')">
+            Company Overview
+        </div>
+
+    </aside>
+
+
+    <main class="main">
+
+        <header class="header">
+
+            <h2>Financial Research AI Agent</h2>
+
+            <div class="status">
+                ● Agent Online
+            </div>
+
+        </header>
+
+
+        <section class="chat" id="chat">
+
+            <div class="message bot">
+
+                <div class="bubble">
+                    Hello! I'm your Financial Research Agent.
+
+                    I can analyze financial health, revenue growth,
+                    profit margins, debt risk and business growth.
+
+                    Ask me a financial question to begin.
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <section class="input-area">
+
+            <div class="input-box">
+
+                <input
+                    id="userInput"
+                    type="text"
+                    placeholder="Ask about a company or financial metric..."
+                    onkeydown="handleKey(event)"
+                >
+
+                <button onclick="sendMessage()">
+                    Send
+                </button>
+
+            </div>
+
+            <div class="quick-actions">
+
+                <button onclick="quickQuestion('Analyze Apple financial health')">
+                    Financial Health
+                </button>
+
+                <button onclick="quickQuestion('Calculate profit margin')">
+                    Profit Margin
+                </button>
+
+                <button onclick="quickQuestion('Analyze revenue growth')">
+                    Revenue Growth
+                </button>
+
+                <button onclick="quickQuestion('Analyze debt risk')">
+                    Debt Risk
+                </button>
+
+            </div>
+
+        </section>
+
+    </main>
+
+</div>
+
+
+<script>
+
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("userInput");
+
+
+    function addMessage(message, type) {
+
+        const container = document.createElement("div");
+
+        container.className = "message " + type;
+
+        const bubble = document.createElement("div");
+
+        bubble.className = "bubble";
+
+        bubble.innerText = message;
+
+        container.appendChild(bubble);
+
+        chat.appendChild(container);
+
+        chat.scrollTop = chat.scrollHeight;
+    }
+
+
+    async function sendMessage() {
+
+        const message = input.value.trim();
+
+        if (!message) {
+            return;
+        }
+
+        addMessage(message, "user");
+
+        input.value = "";
+
+        addMessage("Analyzing your financial question...", "bot");
+
+        try {
+
+            const response = await fetch("http://127.0.0.1:8000/chat", {
+
+                method: "POST",
+
+                headers: {
+                    "Content-Type": "application/json"
+                },
+
+                body: JSON.stringify({
+                    message: message
+                })
+
+            });
+
+
+            const data = await response.json();
+
+            chat.lastElementChild.remove();
+
+            addMessage(data.response, "bot");
+
+        }
+
+        catch (error) {
+
+            chat.lastElementChild.remove();
+
+            addMessage(
+                "Unable to connect to the financial agent. Make sure the Python backend is running.",
+                "bot"
+            );
+
+        }
+    }
+
+
+    function quickQuestion(question) {
+
+        input.value = question;
+
+        sendMessage();
+
+    }
+
+
+    function handleKey(event) {
+
+        if (event.key === "Enter") {
+            sendMessage();
+        }
+
+    }
+
+</script>
+
+</body>
+</html>
+```
